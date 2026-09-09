@@ -1,0 +1,10 @@
+FROM node:20
+
+WORKDIR /services/payment-service/app
+
+COPY package*.json .
+
+RUN yarn install
+
+CMD [ "yarn", "start:dev" ]
+

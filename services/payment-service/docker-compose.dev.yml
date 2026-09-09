@@ -1,0 +1,15 @@
+name: vehicle-service
+
+services:
+  api:
+    image: node:20
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - 4005:4005
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      RABBITMQ_URL: amqp://admin:admin@rabbitmq:5672

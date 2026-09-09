@@ -1,0 +1,81 @@
+services:
+  rabbitmq:
+    image: rabbitmq:4.3.5
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin
+  payment-pg:
+    image: postgres:18
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+  vehicle-pg:
+    image: postgres:18
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+  vehicle-service:
+    image: vehicle-service:dev
+    working_dir: /services/vehicle-service/app
+    build:
+      context: ../../services/vehicle-service
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ../../services/vehicle-service:/services/vehicle-service/app
+      - /services/vehicle-service/app/node_modules
+    ports:
+      - "4000:4000"
+    depends_on:
+      - rabbitmq
+    environment:
+      RABBITMQ_URL: amqp://admin:admin@rabbitmq:5672
+      DB_HOST: vehicle-pg
+      DB_PORT: 5432
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: postgres
+  payment-service:
+    image: payment-service:dev
+    working_dir: /services/payment-service/app
+    build:
+      context: ../../services/payment-service
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ../../services/payment-service:/services/payment-service/app
+      - /services/payment-service/app/node_modules
+    ports:
+      - "4005:4005"
+    depends_on:
+      - rabbitmq
+      - payment-pg
+    environment:
+      RABBITMQ_URL: amqp://admin:admin@rabbitmq:5672
+      DB_HOST: payment-pg
+      DB_PORT: 5432
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: postgres
+  account-service:
+    image: account-service:dev
+    working_dir: /services/account-service/app
+    build:
+      context: ../../services/account-service
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ../../services/account-service:/services/account-service/app
+      - /services/account-service/app/node_modules
+    ports:
+      - "4010:4010"
+    depends_on:
+      - rabbitmq
+    environment:
+      RABBITMQ_URL: amqp://admin:admin@rabbitmq:5672

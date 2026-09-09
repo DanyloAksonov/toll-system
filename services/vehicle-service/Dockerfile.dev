@@ -1,0 +1,10 @@
+FROM node:20
+
+WORKDIR /services/vehicle-service/app
+
+COPY package*.json .
+
+RUN yarn install
+
+CMD [ "yarn", "start:dev" ]
+
