@@ -8,7 +8,6 @@ import { InjectRepository } from '@nestjs/typeorm';
 export class PaymentService implements OnModuleInit, OnModuleDestroy {
   private connection: amqp.AmqpConnectionManager;
   private channelWrapper: amqp.ChannelWrapper;
-  private readonly QUEUE = 'vehicle.detected';
 
   constructor(
     @InjectRepository(TransactionEntity)
@@ -23,9 +22,11 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
     this.channelWrapper = this.connection.createChannel({
       setup: (channel) => {
         return Promise.all([
-          channel.assertQueue(this.QUEUE, { durable: true }),
+          channel.assertExchange('vehicle', 'fanout', { durable: true }),
+          channel.assertQueue('payment.vehicle.queue', { durable: true }),
+          channel.bindQueue('payment.vehicle.queue', 'vehicle', ''),
           channel.prefetch(1),
-          channel.consume(this.QUEUE, (message) =>
+          channel.consume('payment.vehicle.queue', (message) =>
             this.handlePayment(message, channel),
           ),
         ]);

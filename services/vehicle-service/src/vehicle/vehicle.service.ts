@@ -15,7 +15,7 @@ import { Cron } from '@nestjs/schedule';
 export class VehicleService implements OnModuleInit, OnModuleDestroy {
   private connection: amqp.AmqpConnectionManager;
   private channelWrapper: amqp.ChannelWrapper;
-  private readonly QUEUE = 'vehicle.detected';
+  private readonly EXCHANGE = 'vehicle.detected';
 
   constructor(
     @InjectRepository(OutboxEntity)
@@ -29,8 +29,21 @@ export class VehicleService implements OnModuleInit, OnModuleDestroy {
 
     try {
       this.channelWrapper = this.connection.createChannel({
-        setup: (channel) => {
-          return channel.assertQueue(this.QUEUE, { durable: true });
+        setup: async (channel: amqp.Channel) => {
+          await channel.assertExchange(this.EXCHANGE, 'fanout', {
+            durable: true,
+          });
+          await channel.assertQueue('vehicle.main.queue', {
+            durable: true,
+            arguments: {
+              'x-dead-letter-exchange': 'dlx',
+              'x-dead-letter-routing-key': 'vehicle.dead',
+              'x-message-ttl': 30000,
+            },
+          });
+          await channel.assertExchange('dlx', 'direct', { durable: true });
+          await channel.assertQueue('vehicle.dead', { durable: true });
+          await channel.bindQueue('vehicle.dead', 'dlx', 'vehicle.dead');
         },
       });
     } catch (error) {
@@ -58,28 +71,28 @@ export class VehicleService implements OnModuleInit, OnModuleDestroy {
       const eventToSave = this.outboxRepo.create({
         payload: JSON.stringify(event),
         status: 'pending',
-        eventType: this.QUEUE,
+        eventType: this.EXCHANGE,
       });
       const savedEvent = await this.outboxRepo.save(eventToSave);
-      console.log(0);
-
-      await this.channelWrapper.sendToQueue(
-        this.QUEUE,
+      await this.channelWrapper.publish(
+        this.EXCHANGE,
+        '',
         Buffer.from(JSON.stringify(event)),
-        { persistent: true, timeout: 5000 }, // повідомлення збережеться якщо RabbitMQ перезапуститься
+        { timeout: 5000 },
       );
+      // await this.channelWrapper.sendToQueue(
+      //   this.QUEUE,
+      //   Buffer.from(JSON.stringify(event)),
+      //   { persistent: true, timeout: 5000 }, // повідомлення збережеться якщо RabbitMQ перезапуститься
+      // );
       await this.outboxRepo.update(savedEvent.uuid, {
         status: 'processed',
       });
-      console.log(1);
     } catch (error) {
-      console.log(2);
-
       console.error('Failed to publish event:', error);
       return new ServiceUnavailableException('Failed to publish event');
     }
 
-    console.log('Event published:', event);
     return event;
   }
 
