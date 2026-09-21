@@ -1,0 +1,13 @@
+services:
+  account-service:
+    image: account-service:dev
+    working_dir: /app
+    env_file: .env
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - .:/app
+      - /app/node_modules
+    ports:
+      - ${SERVICE_PORT}:${SERVICE_PORT}

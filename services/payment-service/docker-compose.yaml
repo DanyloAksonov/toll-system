@@ -1,0 +1,38 @@
+services:
+  payment-service:
+    image: payment-service:dev
+    working_dir: /app
+    env_file: .env
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - .:/app
+      - /app/node_modules
+    ports:
+      - ${SERVICE_PORT}:${SERVICE_PORT}
+    depends_on:
+      - payment-pg
+    networks:
+      - toll-network
+  payment-pg:
+    image: postgres:18
+    volumes:
+      - db-data:/etc/data
+    ports:
+      - 5433:${DB_PORT}
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    networks:
+      - toll-network
+
+volumes:
+  db-data:
+    name: 'payment-pg-volume'
+
+networks:
+  toll-network:
+    name: toll-network
+    external: true
