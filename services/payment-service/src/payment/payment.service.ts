@@ -20,16 +20,25 @@ export class PaymentService implements OnModuleInit, OnModuleDestroy {
     ]);
 
     this.channelWrapper = this.connection.createChannel({
-      setup: (channel) => {
-        return Promise.all([
-          channel.assertExchange('vehicle', 'fanout', { durable: true }),
+      setup: async (channel) => {
+        await Promise.all([
+          channel.assertExchange('vehicle.detected', 'fanout', {
+            durable: true,
+          }),
           channel.assertQueue('payment.vehicle.queue', { durable: true }),
-          channel.bindQueue('payment.vehicle.queue', 'vehicle', ''),
-          channel.prefetch(1),
-          channel.consume('payment.vehicle.queue', (message) =>
-            this.handlePayment(message, channel),
-          ),
         ]);
+
+        await channel.bindQueue(
+          'payment.vehicle.queue',
+          'vehicle.detected',
+          '',
+        );
+        await channel.prefetch(1);
+        await channel.consume('payment.vehicle.queue', (message) =>
+          this.handlePayment(message, channel),
+        );
+
+        console.log('Payment Service listening to RabbitMQ...');
       },
     });
   }

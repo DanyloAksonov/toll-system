@@ -33,16 +33,21 @@ export class VehicleService implements OnModuleInit, OnModuleDestroy {
           await channel.assertExchange(this.EXCHANGE, 'fanout', {
             durable: true,
           });
-          await channel.assertQueue('vehicle.main.queue', {
-            durable: true,
-            arguments: {
-              'x-dead-letter-exchange': 'dlx',
-              'x-dead-letter-routing-key': 'vehicle.dead',
-              'x-message-ttl': 30000,
-            },
-          });
-          await channel.assertExchange('dlx', 'direct', { durable: true });
-          await channel.assertQueue('vehicle.dead', { durable: true });
+
+          await Promise.all([
+            channel.assertQueue('vehicle.main.queue', {
+              durable: true,
+              arguments: {
+                'x-dead-letter-exchange': 'dlx',
+                'x-dead-letter-routing-key': 'vehicle.dead',
+                'x-message-ttl': 30000,
+              },
+            }),
+            channel.assertExchange('dlx', 'direct', { durable: true }),
+            channel.assertQueue('vehicle.dead', { durable: true }),
+          ]);
+
+          await channel.bindQueue('vehicle.main.queue', this.EXCHANGE, ''); // ← додали!
           await channel.bindQueue('vehicle.dead', 'dlx', 'vehicle.dead');
         },
       });
