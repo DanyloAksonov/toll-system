@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pg-vehicle-statefulset
+  namespace: toll-system
+spec:
+  serviceName: pg-vehicle-statefulset
+  replicas:
+  selector:
+    matchLabels:
+      app: pg-vehicle
+  template:
+    metadata:
+      labels:
+        app: pg-vehicle
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:18
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: pg-vehicle-secret
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pg-vehicle-secret
+                  key: password
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: pg-vehicle-secret
+                  key: database
+          volumeMounts:
+            - name: pg-vehicle-data
+              mountPath: /var/lib/postgresql
+  volumeClaimTemplates:
+    - metadata:
+        name: pg-vehicle-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
