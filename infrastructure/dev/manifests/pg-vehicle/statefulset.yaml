@@ -37,7 +37,7 @@ spec:
                   key: database
           volumeMounts:
             - name: pg-vehicle-data
-              mountPath: /var/lib/postgresql/data
+              mountPath: /var/lib/postgresql
   volumeClaimTemplates:
     - metadata:
         name: pg-vehicle-data

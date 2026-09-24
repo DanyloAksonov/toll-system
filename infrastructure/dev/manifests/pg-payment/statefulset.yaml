@@ -37,7 +37,7 @@ spec:
                   key: database
           volumeMounts:
             - name: pg-payment-data
-              mountPath: /var/lib/postgresql/data
+              mountPath: /var/lib/postgresql
   volumeClaimTemplates:
     - metadata:
         name: pg-payment-data
