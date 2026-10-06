@@ -78,7 +78,13 @@ export const REGISTER_VEHICLE_TRANSITIONS: SagaDefinition = {
   [SagaStatus.NEW]: {
     successStatus: 'AccountVerification',
     failureStatus: SagaStatus.FAILED,
-    command: { exchange: 'account.commands', routingKey: 'account.verify' },
+    command: {
+      exchange: 'account.commands',
+      routingKey: 'account.verify',
+      // Optional: send only what this participant needs. Without it, the
+      // participant receives the saga's whole accumulated payload.
+      buildPayload: (p) => ({ plateNumber: p.plateNumber }),
+    },
   },
   AccountVerification: {
     successStatus: 'ChargingWallet',
@@ -133,6 +139,23 @@ export class AppModule {}
 - **`markProcessed(messageId, consumer, messageType)`** — inbox dedup guard for
   incoming reply consumers. Returns `false` if this `(messageId, consumer)` pair was
   already recorded (meaning: skip it, it's a redelivery); `true` if newly recorded.
+
+## Command message format
+
+Every command (and compensation) is published as a `SagaCommandMessage`:
+
+```ts
+{
+  sagaId: string;    // echo this back in the reply so the orchestrator can forwardSaga()
+  messageId: string; // stable across relay retries - use it with markProcessed()
+  type: string;      // the command's routingKey
+  data: object;      // command.buildPayload(sagaPayload), or the whole payload if omitted
+}
+```
+
+`saga.payload` itself stays the orchestrator's private state: replies passed to
+`forwardSaga(sagaId, outcome, context)` are merged into it, and each step's
+`buildPayload` picks what its participant should see.
 
 ## Outbox relay
 
