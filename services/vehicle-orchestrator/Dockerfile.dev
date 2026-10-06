@@ -1,0 +1,10 @@
+FROM node:20
+
+WORKDIR /app/services/vehicle-orchestrator
+
+COPY services/vehicle-orchestrator/package*.json ./
+COPY packages/saga-core /app/packages/saga-core
+
+RUN yarn install
+
+CMD [ "yarn", "start:dev" ]
