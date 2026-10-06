@@ -13,6 +13,35 @@ export type StartSagaParams = {
 export type SagaCommand = {
   exchange: string;
   routingKey: string;
+  // Picks what this step's participant needs out of the saga's accumulated
+  // payload. Omitted -> the participant receives the whole payload.
+  buildPayload?: (
+    sagaPayload: Record<string, unknown>,
+  ) => Record<string, unknown>;
+};
+
+// What every participant receives on the wire. `sagaId` is what it echoes
+// back in its reply; `messageId` is stable across relay retries, so it can
+// be used as the participant's inbox dedup key.
+export type SagaCommandMessage<
+  TData extends Record<string, unknown> = Record<string, unknown>,
+> = {
+  sagaId: string;
+  messageId: string;
+  type: string; // the command's routingKey
+  data: TData;
+};
+
+// What every participant sends back to the orchestrator.
+export type SagaReply<
+  TData extends Record<string, unknown> = Record<string, unknown>,
+> = {
+  sagaId: string; // from the SagaCommandMessage being answered
+  messageId: string; // unique per reply, used for inbox dedup
+  type: string; // the answered command's routingKey
+  outcome: 'success' | 'failure';
+  data?: TData; // merged into the saga payload on success
+  failureReason?: string;
 };
 
 export type SagaTransition = {

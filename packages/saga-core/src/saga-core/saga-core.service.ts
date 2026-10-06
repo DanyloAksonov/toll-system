@@ -15,7 +15,9 @@ import { SagaEntity } from './entities/saga.entity';
 import {
   SAGA_DEFINITIONS,
   SagaCommand,
+  SagaCommandMessage,
   SagaDefinitions,
+  SagaReply,
   SagaStatus,
   StartSagaParams,
 } from './types';
@@ -27,8 +29,6 @@ export class SagaCoreService implements OnModuleInit, OnModuleDestroy {
   private readonly assertedExchanges = new Set<string>();
 
   constructor(
-    @InjectRepository(InboxEntity)
-    private inboxRepo: Repository<InboxEntity>,
     @InjectRepository(OutboxEntity)
     private outboxRepo: Repository<OutboxEntity>,
     @InjectRepository(SagaEntity)
@@ -78,7 +78,6 @@ export class SagaCoreService implements OnModuleInit, OnModuleDestroy {
 
     return this.dataSource.transaction(async (manager) => {
       const saga = manager.create(SagaEntity, {
-        id: randomUUID(),
         idempotencyKey,
         type,
         payload: parsedPayload,
@@ -102,12 +101,20 @@ export class SagaCoreService implements OnModuleInit, OnModuleDestroy {
 
   // Advances a saga from its current status, based on the outcome of
   // whatever that status's command was waiting on (e.g. a reply message).
+  // Pass `manager` to run inside a caller's transaction (see `handleReply`).
   async forwardSaga(
     sagaId: string,
     outcome: 'success' | 'failure',
     context: Record<string, unknown> = {},
+    manager?: EntityManager,
   ) {
-    const saga = await this.sagaRepo.findOneBy({ id: sagaId });
+    if (!manager) {
+      return this.dataSource.transaction((m) =>
+        this.forwardSaga(sagaId, outcome, context, m),
+      );
+    }
+
+    const saga = await manager.findOneBy(SagaEntity, { id: sagaId });
     if (!saga) {
       console.error(`Saga does not exist with id: ${sagaId}`);
       return null;
@@ -141,47 +148,56 @@ export class SagaCoreService implements OnModuleInit, OnModuleDestroy {
       nextStatus === SagaStatus.COMPLETED || nextStatus === SagaStatus.FAILED;
     const mergedPayload = { ...saga.payload, ...context };
 
-    await this.dataSource.transaction(async (manager) => {
-      const result = await manager.update(
-        SagaEntity,
-        { id: sagaId, version: saga.version },
-        {
-          status: nextStatus,
-          payload: mergedPayload,
-          version: saga.version + 1,
-          ...(isTerminal ? { completedAt: new Date() } : {}),
-          ...(outcome === 'failure' && context.failureReason
-            ? { failureReason: String(context.failureReason) }
-            : {}),
-        },
+    const result = await manager.update(
+      SagaEntity,
+      { id: sagaId, version: saga.version },
+      {
+        status: nextStatus,
+        payload: mergedPayload,
+        version: saga.version + 1,
+        ...(isTerminal ? { completedAt: new Date() } : {}),
+        ...(outcome === 'failure' && context.failureReason
+          ? { failureReason: String(context.failureReason) }
+          : {}),
+      },
+    );
+
+    if (result.affected === 0) {
+      throw new Error(
+        `Concurrent modification detected for saga ${sagaId} (expected version ${saga.version})`,
       );
+    }
 
-      if (result.affected === 0) {
-        throw new Error(
-          `Concurrent modification detected for saga ${sagaId} (expected version ${saga.version})`,
-        );
-      }
-
-      if (nextTransition?.command) {
-        await this.enqueueCommand(
-          manager,
-          sagaId,
-          nextStatus,
-          mergedPayload,
-          nextTransition.command,
-        );
-      }
-    });
+    if (nextTransition?.command) {
+      await this.enqueueCommand(
+        manager,
+        sagaId,
+        nextStatus,
+        mergedPayload,
+        nextTransition.command,
+      );
+    }
   }
 
   // Compensates the saga's *current* step only (emits that step's
   // `compensate` command, if any) and marks the saga FAILED.
+  // Pass `manager` to run inside a caller's transaction (see `handleReply`).
   //
   // NOTE: this does not walk backward through every previously-completed
   // step. A full rollback chain needs a `prev` pointer per step, which
   // isn't implemented yet.
-  async compensateSaga(sagaId: string, reason: string) {
-    const saga = await this.sagaRepo.findOneBy({ id: sagaId });
+  async compensateSaga(
+    sagaId: string,
+    reason: string,
+    manager?: EntityManager,
+  ) {
+    if (!manager) {
+      return this.dataSource.transaction((m) =>
+        this.compensateSaga(sagaId, reason, m),
+      );
+    }
+
+    const saga = await manager.findOneBy(SagaEntity, { id: sagaId });
     if (!saga) {
       console.error(`Saga does not exist with id: ${sagaId}`);
       return null;
@@ -190,31 +206,56 @@ export class SagaCoreService implements OnModuleInit, OnModuleDestroy {
     const definition = this.definitions[saga.type];
     const currentTransition = definition?.[saga.status];
 
+    if (currentTransition?.compensate) {
+      await this.enqueueCommand(
+        manager,
+        sagaId,
+        saga.status,
+        saga.payload,
+        currentTransition.compensate,
+      );
+    }
+
+    const result = await manager.update(
+      SagaEntity,
+      { id: sagaId, version: saga.version },
+      {
+        status: SagaStatus.FAILED,
+        failureReason: reason,
+        version: saga.version + 1,
+        completedAt: new Date(),
+      },
+    );
+
+    if (result.affected === 0) {
+      throw new Error(
+        `Concurrent modification detected for saga ${sagaId} (expected version ${saga.version})`,
+      );
+    }
+  }
+
+  // Applies a participant's reply. The inbox record and the saga update
+  // commit (or roll back) together, so a reply whose processing failed is
+  // not recorded and will be processed again when it is redelivered.
+  async handleReply(reply: SagaReply, consumer: string) {
     await this.dataSource.transaction(async (manager) => {
-      if (currentTransition?.compensate) {
-        await this.enqueueCommand(
-          manager,
-          sagaId,
-          saga.status,
-          saga.payload,
-          currentTransition.compensate,
-        );
+      const isNew = await this.markProcessed(
+        reply.messageId,
+        consumer,
+        reply.type,
+        manager,
+      );
+      if (!isNew) {
+        return; // duplicate - its effects were already committed
       }
 
-      const result = await manager.update(
-        SagaEntity,
-        { id: sagaId, version: saga.version },
-        {
-          status: SagaStatus.FAILED,
-          failureReason: reason,
-          version: saga.version + 1,
-          completedAt: new Date(),
-        },
-      );
-
-      if (result.affected === 0) {
-        throw new Error(
-          `Concurrent modification detected for saga ${sagaId} (expected version ${saga.version})`,
+      if (reply.outcome === 'success') {
+        await this.forwardSaga(reply.sagaId, 'success', reply.data, manager);
+      } else {
+        await this.compensateSaga(
+          reply.sagaId,
+          reply.failureReason ?? `${reply.type} failed`,
+          manager,
         );
       }
     });
@@ -227,13 +268,21 @@ export class SagaCoreService implements OnModuleInit, OnModuleDestroy {
     payload: Record<string, unknown>,
     command: SagaCommand,
   ) {
+    // Generated here (not by the DB) because it has to be inside the stored
+    // payload, so every relay retry republishes the same messageId.
+    const message: SagaCommandMessage = {
+      sagaId,
+      messageId: randomUUID(),
+      type: command.routingKey,
+      data: command.buildPayload ? command.buildPayload(payload) : payload,
+    };
+
     const outboxMessage = manager.create(OutboxEntity, {
-      id: randomUUID(),
       saga: { id: sagaId } as SagaEntity,
       exchange: command.exchange,
       routingKey: command.routingKey,
       messageType: status,
-      payload,
+      payload: message,
     });
     await manager.save(outboxMessage);
   }
@@ -242,21 +291,26 @@ export class SagaCoreService implements OnModuleInit, OnModuleDestroy {
 
   // Returns false if this (messageId, consumer) pair was already recorded
   // (i.e. this message was already processed) - caller should skip it.
+  //
+  // Uses ON CONFLICT DO NOTHING rather than catching the unique violation:
+  // in Postgres a failed statement aborts the whole transaction, which would
+  // break every later query when this runs inside `handleReply`'s transaction.
   async markProcessed(
     messageId: string,
     consumer: string,
     messageType: string,
+    manager: EntityManager = this.dataSource.manager,
   ): Promise<boolean> {
-    try {
-      await this.inboxRepo.insert({ messageId, consumer, messageType });
-      return true;
-    } catch (error) {
-      if (error?.code === '23505') {
-        // unique_violation on (message_id, consumer) - already processed
-        return false;
-      }
-      throw error;
-    }
+    const result = await manager
+      .createQueryBuilder()
+      .insert()
+      .into(InboxEntity)
+      .values({ messageId, consumer, messageType })
+      .orIgnore()
+      .returning(['messageId'])
+      .execute();
+
+    return result.raw.length > 0;
   }
 
   // ---- outbox relay ----
