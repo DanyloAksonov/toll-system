@@ -13,8 +13,11 @@ import { InboxEntity } from './entities/inbox.entity';
 import { OutboxEntity } from './entities/outbox.entity';
 import { SagaEntity } from './entities/saga.entity';
 import {
+  SAGA_CORE_OPTIONS,
   SAGA_DEFINITIONS,
+  SAGA_REPLIES_EXCHANGE,
   SagaCommand,
+  SagaCoreOptions,
   SagaCommandMessage,
   SagaDefinitions,
   SagaReply,
@@ -26,6 +29,7 @@ import {
 export class SagaCoreService implements OnModuleInit, OnModuleDestroy {
   private ampqConnection: amqp.AmqpConnectionManager;
   private ampqChannelWrapper: amqp.ChannelWrapper;
+  private ampqRepliesChannelWrapper: amqp.ChannelWrapper;
   private readonly assertedExchanges = new Set<string>();
 
   constructor(
@@ -37,6 +41,8 @@ export class SagaCoreService implements OnModuleInit, OnModuleDestroy {
     private dataSource: DataSource,
     @Inject(SAGA_DEFINITIONS)
     private readonly definitions: SagaDefinitions,
+    @Inject(SAGA_CORE_OPTIONS)
+    private readonly options: SagaCoreOptions,
   ) {}
 
   onModuleInit() {
@@ -49,14 +55,70 @@ export class SagaCoreService implements OnModuleInit, OnModuleDestroy {
     // instead of needing to know what any saga definition will ever emit.
     this.ampqChannelWrapper = this.ampqConnection.createChannel();
 
+    // Separate channel so the reply consumer's prefetch doesn't affect the relay.
+    const { queue, routingKeys } = this.options.replies;
+    this.ampqRepliesChannelWrapper = this.ampqConnection.createChannel({
+      setup: async (channel) => {
+        // Every participant replies here, whichever step it handled.
+        await channel.assertExchange(SAGA_REPLIES_EXCHANGE, 'direct', {
+          durable: true,
+        });
+
+        await channel.assertQueue(queue, { durable: true });
+
+        for (const routingKey of routingKeys) {
+          await channel.bindQueue(queue, SAGA_REPLIES_EXCHANGE, routingKey);
+        }
+
+        //TODO: add DLX/DLQ for the replies queue, like payment-service does
+
+        await channel.prefetch(1);
+        await channel.consume(queue, (message) =>
+          this.consumeReply(message, channel),
+        );
+      },
+    });
+
     this.ampqConnection.on('error', (err, info) => {
       console.error('SagaCore RabbitMQ connection error:', err, info);
     });
   }
 
   async onModuleDestroy() {
+    await this.ampqRepliesChannelWrapper.close();
     await this.ampqChannelWrapper.close();
     await this.ampqConnection.close();
+  }
+
+  // Handles replies from every participant of every saga this app runs.
+  // Which step comes next is decided by the saga definitions, not here.
+  private async consumeReply(message: any, channel: any) {
+    if (!message) {
+      return;
+    }
+
+    try {
+      const reply: SagaReply = JSON.parse(message.content.toString());
+
+      //TODO: validate the reply shape and nack malformed ones
+
+      //TODO: check that the reply belongs to the saga's current step (reply.type vs saga.status),
+      // so a late reply can't advance a saga that has already moved on
+
+      //TODO: compensate all previously completed steps in reverse order -
+      // compensateSaga currently only compensates the current step (see README)
+
+      // Dedup + forward/compensate in one transaction: a reply is only
+      // recorded as processed if the saga update committed too.
+      await this.handleReply(reply, this.options.consumer);
+
+      channel.ack(message);
+    } catch (error) {
+      //TODO: requeue retryable errors (e.g. concurrent modification) - now safe, since a failed
+      // handleReply leaves no inbox record. Keep dropping/dead-lettering permanent ones (malformed reply)
+      console.error(error);
+      channel.nack(message, false, false);
+    }
   }
 
   // ---- saga lifecycle ----

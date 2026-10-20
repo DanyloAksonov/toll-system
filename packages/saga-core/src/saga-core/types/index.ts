@@ -63,4 +63,18 @@ export type SagaDefinition = Record<string, SagaTransition>;
 // Keyed by saga type (e.g. 'RegisterVehicle', 'VehicleDetection')
 export type SagaDefinitions = Record<string, SagaDefinition>;
 
+export type SagaCoreOptions = {
+  definitions: SagaDefinitions;
+  // Name this orchestrator records replies under in the inbox table.
+  consumer: string;
+  // Where participants send their replies. saga-core binds `queue` to the
+  // `saga.replies` exchange with every routing key and consumes it itself.
+  replies: {
+    queue: string;
+    routingKeys: string[];
+  };
+};
+
 export const SAGA_DEFINITIONS = 'SAGA_DEFINITIONS';
+export const SAGA_CORE_OPTIONS = 'SAGA_CORE_OPTIONS';
+export const SAGA_REPLIES_EXCHANGE = 'saga.replies';

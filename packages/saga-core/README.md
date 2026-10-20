@@ -114,13 +114,28 @@ import { SagaCoreModule } from 'saga-core';
   imports: [
     ScheduleModule.forRoot(),
     SagaCoreModule.forRoot({
-      RegisterVehicle: REGISTER_VEHICLE_TRANSITIONS,
+      definitions: {
+        RegisterVehicle: REGISTER_VEHICLE_TRANSITIONS,
+      },
+      consumer: 'vehicle-orchestrator', // inbox dedup key for replies
+      replies: {
+        queue: 'vehicle-orchestrator.saga.replies',
+        routingKeys: ['register-vehicle.reply'],
+      },
     }),
     // ...
   ],
 })
 export class AppModule {}
 ```
+
+## Reply consumer
+
+saga-core consumes participant replies itself — the app doesn't write a reply
+handler. On startup it asserts the `saga.replies` direct exchange, asserts
+`replies.queue`, binds it with every key in `replies.routingKeys`, and for each
+`SagaReply` on that queue calls `handleReply(reply, consumer)` and acks. A reply that
+fails to process is logged and nacked without requeue (no DLX yet).
 
 ## Using `SagaCoreService`
 

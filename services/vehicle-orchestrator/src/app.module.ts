@@ -15,7 +15,14 @@ import {
     DatabaseModule,
     ScheduleModule.forRoot(),
     SagaCoreModule.forRoot({
-      [VehicleSaga.VehicleDetection]: VEHICLE_DETECTIONS_TRANSITIONS,
+      definitions: {
+        [VehicleSaga.VehicleDetection]: VEHICLE_DETECTIONS_TRANSITIONS,
+      },
+      consumer: 'vehicle-orchestrator',
+      replies: {
+        queue: 'vehicle-orchestrator.saga.replies',
+        routingKeys: ['vehicle-detection.reply'],
+      },
     }),
     VehicleDetectionModule,
   ],
