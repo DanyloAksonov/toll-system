@@ -15,7 +15,8 @@ import { Cron } from '@nestjs/schedule';
 export class VehicleService implements OnModuleInit, OnModuleDestroy {
   private connection: amqp.AmqpConnectionManager;
   private channelWrapper: amqp.ChannelWrapper;
-  private readonly EXCHANGE = 'vehicle.detected';
+  private readonly VEHICLE_EXCHANGE = 'vehicle';
+  private readonly VEHICLE_EXCHANGE_COMMANDS = 'vehicle.commands';
 
   constructor(
     @InjectRepository(OutboxEntity)
@@ -30,25 +31,14 @@ export class VehicleService implements OnModuleInit, OnModuleDestroy {
     try {
       this.channelWrapper = this.connection.createChannel({
         setup: async (channel: amqp.Channel) => {
-          await channel.assertExchange(this.EXCHANGE, 'fanout', {
-            durable: true,
-          });
-
           await Promise.all([
-            channel.assertQueue('vehicle.main.queue', {
+            channel.assertExchange(this.VEHICLE_EXCHANGE, 'fanout', {
               durable: true,
-              arguments: {
-                'x-dead-letter-exchange': 'dlx',
-                'x-dead-letter-routing-key': 'vehicle.dead',
-                'x-message-ttl': 30000,
-              },
             }),
-            channel.assertExchange('dlx', 'direct', { durable: true }),
-            channel.assertQueue('vehicle.dead', { durable: true }),
+            channel.assertExchange(this.VEHICLE_EXCHANGE_COMMANDS, 'direct', {
+              durable: true,
+            }),
           ]);
-
-          await channel.bindQueue('vehicle.main.queue', this.EXCHANGE, ''); // ← додали!
-          await channel.bindQueue('vehicle.dead', 'dlx', 'vehicle.dead');
         },
       });
     } catch (error) {
@@ -76,12 +66,51 @@ export class VehicleService implements OnModuleInit, OnModuleDestroy {
       const eventToSave = this.outboxRepo.create({
         payload: JSON.stringify(event),
         status: 'pending',
-        eventType: this.EXCHANGE,
+        eventType: this.VEHICLE_EXCHANGE,
       });
       const savedEvent = await this.outboxRepo.save(eventToSave);
       await this.channelWrapper.publish(
-        this.EXCHANGE,
+        this.VEHICLE_EXCHANGE,
         '',
+        Buffer.from(JSON.stringify(event)),
+        { timeout: 5000 },
+      );
+      // await this.channelWrapper.sendToQueue(
+      //   this.QUEUE,
+      //   Buffer.from(JSON.stringify(event)),
+      //   { persistent: true, timeout: 5000 }, // повідомлення збережеться якщо RabbitMQ перезапуститься
+      // );
+      await this.outboxRepo.update(savedEvent.uuid, {
+        status: 'processed',
+      });
+    } catch (error) {
+      console.error('Failed to publish event:', error);
+      return new ServiceUnavailableException('Failed to publish event');
+    }
+
+    return event;
+  }
+
+  async detectVehicle_saga(params: IDetectVehicle): Promise<any> {
+    //Rename this method on detectVehicle, after implementing another method with regular communication without sagas
+    const event = {
+      plateNumber: params.plateNumber,
+      gateId: params.gateId,
+      timestamp: new Date().toISOString(),
+      eventId: crypto.randomUUID(),
+    };
+    console.log(event);
+
+    try {
+      const eventToSave = this.outboxRepo.create({
+        payload: JSON.stringify(event),
+        status: 'pending',
+        eventType: this.VEHICLE_EXCHANGE_COMMANDS,
+      });
+      const savedEvent = await this.outboxRepo.save(eventToSave);
+      await this.channelWrapper.publish(
+        this.VEHICLE_EXCHANGE_COMMANDS,
+        'vehicle.detection',
         Buffer.from(JSON.stringify(event)),
         { timeout: 5000 },
       );
@@ -105,7 +134,7 @@ export class VehicleService implements OnModuleInit, OnModuleDestroy {
   async republishEventsFromOutbox() {
     const outboxEvents = await this.outboxRepo.find({
       where: { status: 'pending' },
-      take: 100, // батч по 100
+      take: 100,
       order: { createdAt: 'ASC' },
     });
     await Promise.allSettled(
