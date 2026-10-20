@@ -3,6 +3,8 @@ include:
     env_file: ../../services/vehicle-service/.env
   - path: ../../services/payment-service/docker-compose.yaml
     env_file: ../../services/payment-service/.env
+  - path: ../../services/vehicle-orchestrator/docker-compose.yaml
+    env_file: ../../services/vehicle-orchestrator/.env
 
 services:
   rabbitmq:
