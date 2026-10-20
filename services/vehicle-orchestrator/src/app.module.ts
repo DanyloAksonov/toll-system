@@ -5,7 +5,10 @@ import { AppService } from './app.service';
 import { VehicleDetectionModule } from './vehicle-detection/vehicle-detection.module';
 import { SagaCoreModule } from 'saga-core';
 import { DatabaseModule } from './database/database.module';
-import { VehicleSaga, VEHICLE_DETECTIONS_TRANSITIONS } from './vehicle-detection/sagas';
+import {
+  VehicleSaga,
+  VEHICLE_DETECTIONS_TRANSITIONS,
+} from './vehicle-detection/sagas/vehicle-detection.transitions';
 
 @Module({
   imports: [

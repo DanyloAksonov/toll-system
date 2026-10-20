@@ -249,16 +249,38 @@ export class SagaCoreService implements OnModuleInit, OnModuleDestroy {
         return; // duplicate - its effects were already committed
       }
 
-      if (reply.outcome === 'success') {
+      const failureReason =
+        reply.outcome === 'success'
+          ? await this.validateReplyData(reply, manager)
+          : (reply.failureReason ?? `${reply.type} failed`);
+
+      if (!failureReason) {
         await this.forwardSaga(reply.sagaId, 'success', reply.data, manager);
       } else {
-        await this.compensateSaga(
-          reply.sagaId,
-          reply.failureReason ?? `${reply.type} failed`,
-          manager,
-        );
+        await this.compensateSaga(reply.sagaId, failureReason, manager);
       }
     });
+  }
+
+  // Runs the `validateReply` of the command the saga is currently waiting
+  // on. A reply always arrives while the saga is still in the status that
+  // sent the command, so that status's transition owns the validator.
+  // Returns the failure reason, or null if the data is valid (or there's no
+  // validator for this step).
+  private async validateReplyData(
+    reply: SagaReply,
+    manager: EntityManager,
+  ): Promise<string | null> {
+    const saga = await manager.findOneBy(SagaEntity, { id: reply.sagaId });
+    const validateReply =
+      saga &&
+      this.definitions[saga.type]?.[saga.status]?.command?.validateReply;
+    if (!validateReply) {
+      return null;
+    }
+
+    const error = await validateReply(reply.data ?? {});
+    return error ? `Invalid ${reply.type} reply: ${error}` : null;
   }
 
   private async enqueueCommand(

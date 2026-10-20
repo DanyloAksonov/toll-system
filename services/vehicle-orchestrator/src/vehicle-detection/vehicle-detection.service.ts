@@ -4,7 +4,7 @@ import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { SagaCoreService, SagaReply } from 'saga-core';
-import { VehicleSaga } from './sagas';
+import { VehicleSaga } from './sagas/vehicle-detection.transitions';
 
 @Injectable()
 export class VehicleDetectionService implements OnModuleInit, OnModuleDestroy {
@@ -127,7 +127,7 @@ export class VehicleDetectionService implements OnModuleInit, OnModuleDestroy {
       //TODO: check that the reply belongs to the saga's current step (reply.type vs saga.status),
       // so a late reply can't advance a saga that has already moved on
 
-      //TODO: validate step-specific data (e.g. userId from account-service) and treat invalid data as failure
+      //TODO: add a validateReply (see sagas/vehicle-detection.validators.ts) to every other step's command once it's defined
 
       //TODO: compensate all previously completed steps in reverse order -
       // compensateSaga currently only compensates the current step (see saga-core README)

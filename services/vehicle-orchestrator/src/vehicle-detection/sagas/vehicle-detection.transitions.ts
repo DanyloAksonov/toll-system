@@ -1,4 +1,8 @@
 import { SagaDefinition, SagaStatus } from 'saga-core';
+import {
+  AccountVerifyReply,
+  validateWith,
+} from './vehicle-detection.validators';
 
 export enum VehicleSagaSteps {
   AccountVerification = 'AccountVerification',
@@ -20,6 +24,7 @@ export const VEHICLE_DETECTIONS_TRANSITIONS: SagaDefinition = {
     command: {
       exchange: 'account.commands', // TODO: confirm once account-service's RabbitMQ consumer exists
       routingKey: 'account.verify',
+      validateReply: validateWith(AccountVerifyReply),
     },
   },
   [VehicleSagaSteps.AccountVerification]: {

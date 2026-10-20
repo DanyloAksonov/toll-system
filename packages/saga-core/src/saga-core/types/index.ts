@@ -18,6 +18,12 @@ export type SagaCommand = {
   buildPayload?: (
     sagaPayload: Record<string, unknown>,
   ) => Record<string, unknown>;
+  // Checks the `data` of this command's success reply before the saga moves
+  // on. Return an error message to treat the reply as a failure, or null if
+  // the data is valid.
+  validateReply?: (
+    data: Record<string, unknown>,
+  ) => string | null | Promise<string | null>;
 };
 
 // What every participant receives on the wire. `sagaId` is what it echoes
