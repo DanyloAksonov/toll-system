@@ -11,3 +11,19 @@ services:
       - /app/node_modules
     ports:
       - ${SERVICE_PORT}:${SERVICE_PORT}
+    depends_on:
+      - account-pg
+  account-pg:
+    image: postgres:18
+    volumes:
+      - account-db-data:/etc/data
+    ports:
+      - 5434:${DB_PORT}
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+
+volumes:
+  account-db-data:
+    name: 'account-pg-volume'
