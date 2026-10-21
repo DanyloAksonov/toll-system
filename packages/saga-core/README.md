@@ -11,6 +11,187 @@ messages around each transition. Each consuming service supplies its own saga
 definitions, its own RabbitMQ exchange/routing-key names, and its own database
 connection.
 
+## How it works
+
+### Components
+
+What lives inside saga-core and what the consuming app and the participants own.
+Everything inside the `saga-core` box runs in the orchestrator's process, against the
+orchestrator's own database.
+
+```mermaid
+flowchart LR
+  subgraph app["Orchestrator app"]
+    entry["Domain entry point<br/>e.g. VehicleDetectionService"]
+    defs["SagaDefinitions<br/>status → transition map"]
+    subgraph core["saga-core · SagaCoreService"]
+      start["startSaga"]
+      handle["handleReply"]
+      fwd["forwardSaga"]
+      comp["compensateSaga"]
+      relay["relayOutbox<br/>@Cron every 5s"]
+      consumer["consumeReply"]
+    end
+  end
+
+  subgraph db["Orchestrator DB"]
+    sagas[("sagas")]
+    outbox[("outbox")]
+    inbox[("inbox")]
+  end
+
+  subgraph mq["RabbitMQ"]
+    cmdx{{"command exchanges<br/>from each SagaCommand"}}
+    repx{{"saga.replies"}}
+    repq[["replies.queue"]]
+  end
+
+  participants["Participants<br/>account / vehicle / payment / ..."]
+
+  entry --> start
+  defs -. read by .-> core
+  start --> sagas
+  start --> outbox
+  fwd --> sagas
+  fwd --> outbox
+  comp --> sagas
+  comp --> outbox
+  relay -- "poll unpublished rows" --> outbox
+  relay -- publish --> cmdx
+  cmdx --> participants
+  participants -- SagaReply --> repx
+  repx -- "replies.routingKeys" --> repq
+  repq --> consumer
+  consumer --> handle
+  handle --> inbox
+  handle --> fwd
+  handle --> comp
+```
+
+### One saga, end to end
+
+The app only calls `startSaga`. Every later step is driven by replies, and every
+command reaches RabbitMQ through the outbox — never published directly from inside a
+transaction.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant App as Orchestrator app
+  participant Core as SagaCoreService
+  participant DB as Orchestrator DB
+  participant MQ as RabbitMQ
+  participant P as Participant
+
+  App->>Core: startSaga(type, payload, idempotencyKey)
+  Core->>DB: saga exists for idempotencyKey?
+  alt already started
+    Core-->>App: existing saga, nothing enqueued
+  else new
+    rect rgba(127,127,127,0.12)
+      note over Core,DB: one transaction
+      Core->>DB: INSERT sagas, status = NEW
+      Core->>DB: INSERT outbox, NEW's command
+    end
+    Core-->>App: saga
+  end
+
+  loop relayOutbox, every 5s
+    Core->>DB: SELECT outbox WHERE publishedAt IS NULL LIMIT 50
+    Core->>MQ: publish SagaCommandMessage to command.exchange / routingKey
+    Core->>DB: SET publishedAt, or attempts + 1 and lastError on failure
+  end
+
+  MQ->>P: SagaCommandMessage {sagaId, messageId, type, data}
+  P->>MQ: SagaReply to saga.replies {sagaId, messageId, type, outcome, data}
+  MQ->>Core: consumeReply, from replies.queue
+
+  rect rgba(127,127,127,0.12)
+    note over Core,DB: handleReply, one transaction
+    Core->>DB: INSERT inbox (messageId, consumer) ON CONFLICT DO NOTHING
+    alt duplicate reply
+      note over Core: skip, effects already committed
+    else success and data valid
+      Core->>DB: UPDATE sagas → successStatus, merge reply.data, version + 1
+      Core->>DB: INSERT outbox, next status's command if any
+    else failure, or validateReply rejected data
+      Core->>DB: INSERT outbox, current status's compensate if any
+      Core->>DB: UPDATE sagas → FAILED, failureReason
+    end
+  end
+  Core->>MQ: ack, or nack without requeue if anything threw
+```
+
+The next relay tick publishes whatever `handleReply` enqueued, and the loop repeats
+until the saga reaches `COMPLETED` or `FAILED`.
+
+### Reply decision
+
+What `handleReply` does with a single reply. All of it runs in one transaction, so if
+anything throws, the inbox row is rolled back too and a redelivery is processed from
+scratch.
+
+```mermaid
+flowchart TD
+  r["SagaReply arrives"] --> dedup{"inbox insert<br/>(messageId, consumer)<br/>new row?"}
+  dedup -- no --> skip["return: duplicate"]
+  dedup -- yes --> outcome{"reply.outcome"}
+  outcome -- failure --> reason["reason = reply.failureReason<br/>or 'type failed'"]
+  outcome -- success --> v{"current status's<br/>command.validateReply"}
+  v -- "absent or returns null" --> forward["forwardSaga success"]
+  v -- "returns error" --> reason
+  reason --> compensate["compensateSaga reason"]
+
+  forward --> f1["status = successStatus<br/>payload = payload + reply.data<br/>version + 1, optimistic"]
+  f1 --> f2{"next status<br/>has a command?"}
+  f2 -- yes --> f3["outbox ← SagaCommandMessage"]
+  f2 -- no --> done1["done"]
+
+  compensate --> c1{"current status<br/>has compensate?"}
+  c1 -- yes --> c2["outbox ← compensate message"]
+  c1 -- no --> c3
+  c2 --> c3["status = FAILED<br/>failureReason, completedAt<br/>version + 1, optimistic"]
+```
+
+A failure reply goes straight to `compensateSaga`, which sets `FAILED` — it does not
+follow the definition's `failureStatus`. `failureStatus` is only used when the app
+calls `forwardSaga(sagaId, 'failure')` itself.
+
+### How a definition is walked
+
+A status's `command` is emitted when the saga **enters** that status, and the saga then
+waits in it for the reply. So the reply to `NEW`'s command arrives while the saga is
+still `NEW`, and `NEW`'s `successStatus` decides where it goes.
+
+```mermaid
+stateDiagram-v2
+  direction LR
+  [*] --> NEW: startSaga, emits NEW.command
+  NEW --> StepA: success, emits StepA.command
+  StepA --> StepB: success, emits StepB.command
+  StepB --> COMPLETED: success
+  NEW --> FAILED: failure, emits NEW.compensate
+  StepA --> FAILED: failure, emits StepA.compensate
+  StepB --> FAILED: failure, emits StepB.compensate
+  COMPLETED --> [*]
+  FAILED --> [*]
+```
+
+Only the compensation of the status the saga is in at the moment of failure is
+emitted. Steps that completed earlier are not rolled back (see
+[Known limitations](#known-limitations)).
+
+### Delivery guarantees
+
+- **Commands are at-least-once.** The relay marks a row published only *after*
+  `publish` returns, so a crash in between republishes it. `messageId` is fixed when
+  the row is written, so participants can dedup on it.
+- **Replies are processed exactly once per `consumer`.** The inbox row and the saga
+  update commit together.
+- **Concurrent updates fail loudly.** Every saga update is conditioned on
+  `version`. A lost race throws, the transaction rolls back, and the reply is
+  currently dropped (nack without requeue).
+
 ## Installing
 
 Not published to a registry. Each consumer depends on it via a local path:
